@@ -1,0 +1,8 @@
+{
+  "engine": "cocos-creator-js",
+  "packages": "packages",
+  "name": "GeoLocation",
+  "id": "83e36e55-82bf-4254-8414-f38676055982",
+  "version": "2.4.13",
+  "isNew": false
+}
