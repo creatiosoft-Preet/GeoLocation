@@ -1060,7 +1060,9 @@
     "lngLabel": {
       "__id__": 16
     },
-    "locationLabel": null,
+    "locationLabel": {
+      "__id__": 20
+    },
     "_id": "2awPSYu/ZB1Yv8OdEBA6N1"
   }
 ]

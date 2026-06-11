@@ -39,7 +39,7 @@ export default class LocationManager {
             cc.log("[LocationManager] calling iOS getLocation");
             jsb.reflection.callStaticMethod(
                 "LocationHelper",
-                "getLocation",
+                "getLocation:",
                 ""
             );
         }

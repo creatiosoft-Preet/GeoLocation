@@ -22,7 +22,7 @@
   "zipCompressJs": true,
   "fb-instant-games": {},
   "android": {
-    "packageName": "org.cocos2d.demo",
+    "packageName": "org.geolocation.demo",
     "REMOTE_SERVER_ROOT": ""
   },
   "ios": {

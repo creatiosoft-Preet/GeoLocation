@@ -1,4 +1,5 @@
 import { LocationEvent } from "./LocationEvent";
+import LocationManager from "./LocationManager";
 
 export default class LocationPermission {
 
@@ -17,7 +18,7 @@ export default class LocationPermission {
         } else if (cc.sys.os === cc.sys.OS_IOS) {
             jsb.reflection.callStaticMethod(
                 "LocationHelper",
-                "requestPermission",
+                "requestPermission:",
                 ""
             );
         }
@@ -27,7 +28,7 @@ export default class LocationPermission {
 
 (window as any).onLocationPermission = (granted: boolean) => {
     if (granted) {
-        cc.systemEvent.emit(LocationEvent.LOCATION_UPDATE);
+        LocationManager.instance.getLocation();
     } else {
         cc.systemEvent.emit(LocationEvent.LOCATION_PERMISSION_DENIED);
     }
