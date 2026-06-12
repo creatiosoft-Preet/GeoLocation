@@ -31,6 +31,10 @@
       <key>NSAllowsArbitraryLoads</key>
       <true/>
     </dict>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+      <string>App-prefs</string>
+    </array>
     <key>UILaunchStoryboardName</key>
     <string>LaunchScreen</string>
     <key>UIPrerenderedIcon</key>

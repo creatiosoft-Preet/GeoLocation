@@ -1,5 +1,6 @@
 import { LocationEvent } from "./LocationEvent";
 import LocationManager from "./LocationManager";
+import GeofenceManager from "./GeofenceManager";
 
 export default class LocationPermission {
 
@@ -29,6 +30,7 @@ export default class LocationPermission {
 (window as any).onLocationPermission = (granted: boolean) => {
     if (granted) {
         LocationManager.instance.getLocation();
+        GeofenceManager.instance.init();
     } else {
         cc.systemEvent.emit(LocationEvent.LOCATION_PERMISSION_DENIED);
     }

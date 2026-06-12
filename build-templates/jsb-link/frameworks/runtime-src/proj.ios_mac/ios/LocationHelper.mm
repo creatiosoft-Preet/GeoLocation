@@ -8,6 +8,7 @@ static LocationHelper *_delegate = nil;
 static BOOL _alertShowing = NO;
 static UIAlertController *_permissionAlert = nil;
 static id _becomeActiveObserver = nil;
+static BOOL _continuousMode = NO;
 
 @implementation LocationHelper
 
@@ -21,10 +22,17 @@ static id _becomeActiveObserver = nil;
     return _locationManager;
 }
 
-+ (void)requestPermission:(NSString *)ignored { [LocationHelper requestPermission]; }
-+ (void)getLocation:(NSString *)ignored     { [LocationHelper getLocation]; }
++ (void)requestPermission:(NSString *)ignored       { [LocationHelper requestPermission]; }
++ (void)getLocation:(NSString *)ignored             { [LocationHelper getLocation]; }
++ (void)startContinuousUpdates:(NSString *)ignored  { [LocationHelper startContinuousUpdates]; }
++ (void)stopContinuousUpdates:(NSString *)ignored   { [LocationHelper stopContinuousUpdates]; }
 
 + (void)requestPermission {
+    if (![CLLocationManager locationServicesEnabled]) {
+        [LocationHelper showLocationServicesAlert];
+        return;
+    }
+
     CLAuthorizationStatus status = [CLLocationManager authorizationStatus];
 
     if (status == kCLAuthorizationStatusAuthorizedWhenInUse ||
@@ -73,14 +81,6 @@ static id _becomeActiveObserver = nil;
                 [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
             }]];
 
-        [alert addAction:[UIAlertAction
-            actionWithTitle:@"Cancel"
-            style:UIAlertActionStyleCancel
-            handler:^(UIAlertAction *a) {
-                _alertShowing = NO;
-                [LocationHelper notifyPermission:NO];
-            }]];
-
         _permissionAlert = alert;
         UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
         [root presentViewController:alert animated:YES completion:nil];
@@ -88,6 +88,11 @@ static id _becomeActiveObserver = nil;
 }
 
 + (void)getLocation {
+    if (![CLLocationManager locationServicesEnabled]) {
+        [LocationHelper showLocationServicesAlert];
+        return;
+    }
+
     CLAuthorizationStatus status = [CLLocationManager authorizationStatus];
     if (status != kCLAuthorizationStatusAuthorizedWhenInUse &&
         status != kCLAuthorizationStatusAuthorizedAlways) {
@@ -101,6 +106,70 @@ static id _becomeActiveObserver = nil;
     } else {
         [[LocationHelper sharedManager] startUpdatingLocation];
     }
+}
+
++ (void)startContinuousUpdates {
+    _continuousMode = YES;
+    CLLocationManager *mgr = [LocationHelper sharedManager];
+    mgr.distanceFilter = 1.0;
+    mgr.desiredAccuracy = kCLLocationAccuracyBest;
+    [mgr startUpdatingLocation];
+}
+
++ (void)showAlert:(NSString *)params {
+    NSArray *parts = [params componentsSeparatedByString:@"|"];
+    NSString *title   = parts.count > 0 ? parts[0] : @"Alert";
+    NSString *message = parts.count > 1 ? parts[1] : @"";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:title
+            message:message
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+            style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
+        [root presentViewController:alert animated:YES completion:nil];
+    });
+}
+
++ (void)stopContinuousUpdates {
+    _continuousMode = NO;
+    [_locationManager stopUpdatingLocation];
+}
+
++ (void)showLocationServicesAlert {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Location Services Disabled"
+            message:@"Your device's Location is turned off.\n\nTo enable it:\nPhone Settings → Privacy & Security → Location Services → Turn ON"
+            preferredStyle:UIAlertControllerStyleAlert];
+
+        [alert addAction:[UIAlertAction
+            actionWithTitle:@"Open Settings"
+            style:UIAlertActionStyleDefault
+            handler:^(UIAlertAction *a) {
+                __block id observer = [[NSNotificationCenter defaultCenter]
+                    addObserverForName:UIApplicationDidBecomeActiveNotification
+                    object:nil queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+                        [[NSNotificationCenter defaultCenter] removeObserver:observer];
+                        observer = nil;
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                            dispatch_get_main_queue(), ^{
+                            if ([CLLocationManager locationServicesEnabled]) {
+                                [LocationHelper requestPermission];
+                            } else {
+                                [LocationHelper showLocationServicesAlert];
+                            }
+                        });
+                    }];
+                NSURL *url = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
+                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            }]];
+
+        UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
+        [root presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 + (void)notifyPermission:(BOOL)granted {
@@ -189,8 +258,14 @@ static id _becomeActiveObserver = nil;
 // CLLocationManagerDelegate
 - (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray *)locations {
     CLLocation *location = locations.lastObject;
-    [manager stopUpdatingLocation];
-    [LocationHelper reverseGeocode:location];
+    if (_continuousMode) {
+        NSString *js = [NSString stringWithFormat:@"window.onLocationTick(%f,%f)",
+            location.coordinate.latitude, location.coordinate.longitude];
+        [LocationHelper evalJS:js];
+    } else {
+        [manager stopUpdatingLocation];
+        [LocationHelper reverseGeocode:location];
+    }
 }
 
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {

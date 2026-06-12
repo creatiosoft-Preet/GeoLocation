@@ -64,7 +64,7 @@ public class AppActivity extends Cocos2dxActivity {
     protected void onResume() {
         super.onResume();
         SDKWrapper.getInstance().onResume();
-
+        LocationHelper.onAppResume();
     }
 
     @Override

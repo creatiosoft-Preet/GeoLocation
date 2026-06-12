@@ -30,6 +30,10 @@ public class LocationHelper {
 
     private static final String TAG = "LocationHelper";
     static final int PERMISSION_REQUEST_CODE = 1001;
+    private static boolean _waitingForLocationServices = false;
+    private static boolean _waitingForPermission = false;
+    private static boolean _continuousMode = false;
+    private static android.location.LocationListener _continuousListener = null;
 
     public static void requestPermission() {
         AppActivity activity = AppActivity.getInstance();
@@ -57,18 +61,125 @@ public class LocationHelper {
         }
     }
 
+    static void onAppResume() {
+        AppActivity activity = AppActivity.getInstance();
+        if (activity == null) return;
+
+        if (_waitingForLocationServices) {
+            _waitingForLocationServices = false;
+            LocationManager lm = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+            boolean enabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                           || lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+            if (enabled) {
+                requestPermission();
+            } else {
+                showLocationServicesAlert(activity);
+            }
+        } else if (_waitingForPermission) {
+            _waitingForPermission = false;
+            if (activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    == PackageManager.PERMISSION_GRANTED) {
+                notifyPermissionResult(activity, true);
+            } else {
+                showPermissionDeniedAlert(activity);
+            }
+        }
+    }
+
+    public static void startContinuousUpdates() {
+        AppActivity activity = AppActivity.getInstance();
+        if (activity == null) return;
+        if (activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) return;
+
+        _continuousMode = true;
+        LocationManager lm = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+
+        _continuousListener = new android.location.LocationListener() {
+            @Override
+            public void onLocationChanged(Location location) {
+                Log.d(TAG, "onLocationChanged: provider=" + location.getProvider()
+                        + " lat=" + location.getLatitude()
+                        + " lng=" + location.getLongitude()
+                        + " acc=" + location.getAccuracy());
+                String js = String.format(Locale.US, "window.onLocationTick(%f,%f)",
+                        location.getLatitude(), location.getLongitude());
+                activity.runOnGLThread(() ->
+                        Cocos2dxJavascriptJavaBridge.evalString(js));
+            }
+            @Override public void onStatusChanged(String p, int s, Bundle e) {}
+            @Override public void onProviderEnabled(String p) {}
+            @Override public void onProviderDisabled(String p) {}
+        };
+
+        activity.runOnUiThread(() -> {
+            boolean gpsEnabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
+            boolean networkEnabled = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+            Log.d(TAG, "startContinuousUpdates: gpsEnabled=" + gpsEnabled + " networkEnabled=" + networkEnabled);
+            try {
+                if (gpsEnabled) {
+                    lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 1, _continuousListener, Looper.getMainLooper());
+                }
+                if (networkEnabled) {
+                    lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000, 1, _continuousListener, Looper.getMainLooper());
+                }
+            } catch (SecurityException e) {
+                Log.w(TAG, "startContinuousUpdates: " + e.getMessage());
+            }
+        });
+    }
+
+    public static void showAlert(String params) {
+        String[] parts = params.split("\\|", 2);
+        String title   = parts.length > 0 ? parts[0] : "Alert";
+        String message = parts.length > 1 ? parts[1] : "";
+        AppActivity activity = AppActivity.getInstance();
+        if (activity == null) return;
+        activity.runOnUiThread(() ->
+            new AlertDialog.Builder(activity)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton("OK", null)
+                .show()
+        );
+    }
+
+    public static void stopContinuousUpdates() {
+        _continuousMode = false;
+        AppActivity activity = AppActivity.getInstance();
+        if (activity != null && _continuousListener != null) {
+            LocationManager lm = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+            lm.removeUpdates(_continuousListener);
+            _continuousListener = null;
+        }
+    }
+
+    private static void showLocationServicesAlert(AppActivity activity) {
+        activity.runOnUiThread(() ->
+            new AlertDialog.Builder(activity)
+                .setTitle("Location Services Disabled")
+                .setMessage("Your device's Location is turned off.\n\nTo enable it:\nSettings → Location → Turn ON")
+                .setPositiveButton("Open Settings", (dialog, which) -> {
+                    _waitingForLocationServices = true;
+                    Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+                    activity.startActivity(intent);
+                })
+                .setCancelable(false)
+                .show()
+        );
+    }
+
     private static void showPermissionDeniedAlert(AppActivity activity) {
         activity.runOnUiThread(() ->
             new AlertDialog.Builder(activity)
                 .setTitle("Location Permission Required")
                 .setMessage("Please go to Settings and enable location access for this app.")
                 .setPositiveButton("Open Settings", (dialog, which) -> {
+                    _waitingForPermission = true;
                     Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                     intent.setData(Uri.fromParts("package", activity.getPackageName(), null));
                     activity.startActivity(intent);
                 })
-                .setNegativeButton("Cancel", (dialog, which) ->
-                    notifyPermissionResult(activity, false))
                 .setCancelable(false)
                 .show()
         );
@@ -91,6 +202,12 @@ public class LocationHelper {
         }
 
         LocationManager locationManager = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+        boolean gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        boolean networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        if (!gpsEnabled && !networkEnabled) {
+            showLocationServicesAlert(activity);
+            return;
+        }
 
         Location best = getBestLastLocation(locationManager);
         if (best != null) {
