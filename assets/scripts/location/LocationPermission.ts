@@ -1,12 +1,16 @@
 import { LocationEvent } from "./LocationEvent";
 import LocationManager from "./LocationManager";
 import GeofenceManager from "./GeofenceManager";
+import WebLocationHelper from "./WebLocationHelper";
 
 export default class LocationPermission {
 
+    /** false when the user granted only approximate location. */
+    public static isPrecise = false;
+
     public static request() {
         if (!cc.sys.isNative) {
-            cc.systemEvent.emit(LocationEvent.LOCATION_ERROR, "Native only");
+            WebLocationHelper.requestPermission();
             return;
         }
 
@@ -27,8 +31,10 @@ export default class LocationPermission {
 
 }
 
-(window as any).onLocationPermission = (granted: boolean) => {
+(window as any).onLocationPermission = (granted: boolean, precise: boolean) => {
     if (granted) {
+        LocationPermission.isPrecise = !!precise;
+        if (!precise) cc.warn("[LocationPermission] only approximate location granted");
         LocationManager.instance.getLocation();
         GeofenceManager.instance.init();
     } else {

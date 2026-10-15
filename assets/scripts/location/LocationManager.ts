@@ -1,5 +1,6 @@
 import { IGeoLocation } from "./IGeoLocation";
 import { LocationEvent } from "./LocationEvent";
+import WebLocationHelper from "./WebLocationHelper";
 
 export default class LocationManager {
 
@@ -26,7 +27,10 @@ export default class LocationManager {
     public getLocation() {
         cc.log("[LocationManager] getLocation called, isNative:", cc.sys.isNative, "os:", cc.sys.os);
 
-        if (!cc.sys.isNative) return;
+        if (!cc.sys.isNative) {
+            WebLocationHelper.getLocation();
+            return;
+        }
 
         if (cc.sys.os === cc.sys.OS_ANDROID) {
             cc.log("[LocationManager] calling Android getLocation");

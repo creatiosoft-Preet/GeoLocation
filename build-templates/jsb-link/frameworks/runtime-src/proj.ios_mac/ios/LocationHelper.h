@@ -7,5 +7,8 @@
 + (void)requestPermission:(NSString *)ignored;
 + (void)getLocation;
 + (void)getLocation:(NSString *)ignored;
++ (void)startContinuousUpdates:(NSString *)ignored;
++ (void)stopContinuousUpdates:(NSString *)ignored;
++ (void)showAlert:(NSString *)params;
 
 @end

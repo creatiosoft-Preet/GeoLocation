@@ -27,7 +27,6 @@ package org.cocos2dx.javascript;
 import org.cocos2dx.lib.Cocos2dxActivity;
 import org.cocos2dx.lib.Cocos2dxGLSurfaceView;
 
-import android.content.pm.PackageManager;
 import android.os.Bundle;
 
 import android.content.Intent;
@@ -115,8 +114,7 @@ public class AppActivity extends Cocos2dxActivity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == LocationHelper.PERMISSION_REQUEST_CODE) {
-            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-            LocationHelper.onPermissionResult(granted);
+            LocationHelper.onPermissionResult();
         }
     }
 

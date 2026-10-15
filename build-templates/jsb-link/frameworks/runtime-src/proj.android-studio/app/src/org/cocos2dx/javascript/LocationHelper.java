@@ -11,50 +11,57 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
 
 import org.cocos2dx.lib.Cocos2dxJavascriptJavaBridge;
+import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.List;
 import java.util.Locale;
 
+// Targets minSdk 24, so the framework permission APIs (added in API 23) are safe to call directly.
 public class LocationHelper {
 
     private static final String TAG = "LocationHelper";
-    static final int PERMISSION_REQUEST_CODE = 1001;
+    // 1001/1002 are taken by camera/microphone in txpoker, so location uses its own code.
+    static final int PERMISSION_REQUEST_CODE = 3001;
+    // A cached fix older than this is not reused; a fresh one is requested instead.
+    private static final long MAX_CACHED_AGE_MS = 60 * 1000;
+    private static final long SINGLE_FIX_TIMEOUT_MS = 30 * 1000;
+
+    private static final String[] LOCATION_PERMISSIONS = {
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+    };
+
     private static boolean _waitingForLocationServices = false;
     private static boolean _waitingForPermission = false;
-    private static boolean _continuousMode = false;
-    private static android.location.LocationListener _continuousListener = null;
+    private static LocationListener _continuousListener = null;
 
     public static void requestPermission() {
         AppActivity activity = AppActivity.getInstance();
         if (activity == null) return;
 
-        if (activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED) {
+        if (hasAnyPermission(activity)) {
             notifyPermissionResult(activity, true);
         } else {
+            // Android 12+ ignores a request for FINE alone, so ask for FINE and COARSE together.
             activity.runOnUiThread(() ->
-                activity.requestPermissions(
-                    new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
-                    PERMISSION_REQUEST_CODE)
+                activity.requestPermissions(LOCATION_PERMISSIONS, PERMISSION_REQUEST_CODE)
             );
         }
     }
 
-    static void onPermissionResult(boolean granted) {
+    static void onPermissionResult() {
         AppActivity activity = AppActivity.getInstance();
         if (activity == null) return;
-        if (granted) {
+        // The user may pick "approximate", which grants COARSE only; that still counts as granted.
+        if (hasAnyPermission(activity)) {
             notifyPermissionResult(activity, true);
         } else {
             showPermissionDeniedAlert(activity);
@@ -67,18 +74,14 @@ public class LocationHelper {
 
         if (_waitingForLocationServices) {
             _waitingForLocationServices = false;
-            LocationManager lm = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
-            boolean enabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
-                           || lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-            if (enabled) {
+            if (isLocationEnabled(activity)) {
                 requestPermission();
             } else {
                 showLocationServicesAlert(activity);
             }
         } else if (_waitingForPermission) {
             _waitingForPermission = false;
-            if (activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                    == PackageManager.PERMISSION_GRANTED) {
+            if (hasAnyPermission(activity)) {
                 notifyPermissionResult(activity, true);
             } else {
                 showPermissionDeniedAlert(activity);
@@ -89,21 +92,22 @@ public class LocationHelper {
     public static void startContinuousUpdates() {
         AppActivity activity = AppActivity.getInstance();
         if (activity == null) return;
-        if (activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) return;
+        if (!hasAnyPermission(activity)) return;
+        // Already running: registering again would deliver every tick twice.
+        if (_continuousListener != null) return;
 
-        _continuousMode = true;
         LocationManager lm = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
 
-        _continuousListener = new android.location.LocationListener() {
+        _continuousListener = new LocationListener() {
             @Override
             public void onLocationChanged(Location location) {
                 Log.d(TAG, "onLocationChanged: provider=" + location.getProvider()
                         + " lat=" + location.getLatitude()
                         + " lng=" + location.getLongitude()
                         + " acc=" + location.getAccuracy());
-                String js = String.format(Locale.US, "window.onLocationTick(%f,%f)",
-                        location.getLatitude(), location.getLongitude());
+                String js = String.format(Locale.US, "window.onLocationTick(%f,%f,%f)",
+                        location.getLatitude(), location.getLongitude(),
+                        location.hasAccuracy() ? location.getAccuracy() : -1f);
                 activity.runOnGLThread(() ->
                         Cocos2dxJavascriptJavaBridge.evalString(js));
             }
@@ -112,16 +116,17 @@ public class LocationHelper {
             @Override public void onProviderDisabled(String p) {}
         };
 
+        final LocationListener listener = _continuousListener;
         activity.runOnUiThread(() -> {
             boolean gpsEnabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
             boolean networkEnabled = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
             Log.d(TAG, "startContinuousUpdates: gpsEnabled=" + gpsEnabled + " networkEnabled=" + networkEnabled);
             try {
                 if (gpsEnabled) {
-                    lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 1, _continuousListener, Looper.getMainLooper());
+                    lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 1, listener, Looper.getMainLooper());
                 }
                 if (networkEnabled) {
-                    lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000, 1, _continuousListener, Looper.getMainLooper());
+                    lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000, 1, listener, Looper.getMainLooper());
                 }
             } catch (SecurityException e) {
                 Log.w(TAG, "startContinuousUpdates: " + e.getMessage());
@@ -145,7 +150,6 @@ public class LocationHelper {
     }
 
     public static void stopContinuousUpdates() {
-        _continuousMode = false;
         AppActivity activity = AppActivity.getInstance();
         if (activity != null && _continuousListener != null) {
             LocationManager lm = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
@@ -186,8 +190,10 @@ public class LocationHelper {
     }
 
     private static void notifyPermissionResult(AppActivity activity, boolean granted) {
+        final boolean precise = hasFinePermission(activity);
         activity.runOnGLThread(() ->
-            Cocos2dxJavascriptJavaBridge.evalString("window.onLocationPermission(" + granted + ")")
+            Cocos2dxJavascriptJavaBridge.evalString(
+                    "window.onLocationPermission(" + granted + "," + precise + ")")
         );
     }
 
@@ -195,125 +201,178 @@ public class LocationHelper {
         AppActivity activity = AppActivity.getInstance();
         if (activity == null) return;
 
-        if (activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
+        if (!hasAnyPermission(activity)) {
             sendError(activity, "Permission not granted");
             return;
         }
 
-        LocationManager locationManager = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
-        boolean gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
-        boolean networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-        if (!gpsEnabled && !networkEnabled) {
+        if (!isLocationEnabled(activity)) {
             showLocationServicesAlert(activity);
             return;
         }
 
-        Location best = getBestLastLocation(locationManager);
-        if (best != null) {
-            processAndSend(activity, best);
+        LocationManager locationManager = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+
+        Location cached = getBestLastLocation(locationManager);
+        if (cached != null && System.currentTimeMillis() - cached.getTime() < MAX_CACHED_AGE_MS) {
+            processAndSend(activity, cached);
             return;
         }
 
-        // No cached location — request fresh fix
+        // No recent cached location — request a fresh fix
         activity.runOnUiThread(() -> {
-            String provider = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-                    ? LocationManager.GPS_PROVIDER
-                    : LocationManager.NETWORK_PROVIDER;
+            String provider = pickProvider(locationManager, hasFinePermission(activity));
+            if (provider == null) {
+                sendError(activity, "No location provider enabled");
+                return;
+            }
             try {
-                locationManager.requestSingleUpdate(provider, new LocationListener() {
-                    @Override
-                    public void onLocationChanged(Location location) {
-                        processAndSend(activity, location);
-                    }
-                    @Override public void onStatusChanged(String p, int s, Bundle e) {}
-                    @Override public void onProviderEnabled(String p) {}
-                    @Override public void onProviderDisabled(String p) {
-                        sendError(activity, "Provider disabled");
-                    }
-                }, Looper.getMainLooper());
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // Times out by itself and returns null if no fix arrives.
+                    locationManager.getCurrentLocation(provider, null, activity.getMainExecutor(), location -> {
+                        if (location != null) {
+                            processAndSend(activity, location);
+                        } else {
+                            sendError(activity, "Location timeout");
+                        }
+                    });
+                } else {
+                    requestSingleFixLegacy(activity, locationManager, provider);
+                }
             } catch (SecurityException e) {
                 sendError(activity, "Security exception");
             }
         });
     }
 
-    private static Location getBestLastLocation(LocationManager lm) {
-        Location gps = null, network = null;
-        try {
-            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER))
-                gps = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-        } catch (SecurityException ignored) {}
-        try {
-            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER))
-                network = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-        } catch (SecurityException ignored) {}
+    // API 24-29: requestSingleUpdate has no timeout of its own, so add one.
+    @SuppressWarnings("deprecation")
+    private static void requestSingleFixLegacy(AppActivity activity, LocationManager lm, String provider) {
+        final Handler handler = new Handler(Looper.getMainLooper());
+        final boolean[] done = {false};
+        final LocationListener listener = new LocationListener() {
+            @Override
+            public void onLocationChanged(Location location) {
+                if (done[0]) return;
+                done[0] = true;
+                handler.removeCallbacksAndMessages(null);
+                processAndSend(activity, location);
+            }
+            @Override public void onStatusChanged(String p, int s, Bundle e) {}
+            @Override public void onProviderEnabled(String p) {}
+            @Override public void onProviderDisabled(String p) {
+                if (done[0]) return;
+                done[0] = true;
+                handler.removeCallbacksAndMessages(null);
+                sendError(activity, "Provider disabled");
+            }
+        };
+        lm.requestSingleUpdate(provider, listener, Looper.getMainLooper());
+        handler.postDelayed(() -> {
+            if (done[0]) return;
+            done[0] = true;
+            lm.removeUpdates(listener);
+            sendError(activity, "Location timeout");
+        }, SINGLE_FIX_TIMEOUT_MS);
+    }
 
-        if (gps != null && network != null)
-            return gps.getAccuracy() <= network.getAccuracy() ? gps : network;
-        return gps != null ? gps : network;
+    private static boolean hasFinePermission(Context context) {
+        return context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static boolean hasAnyPermission(Context context) {
+        return hasFinePermission(context)
+                || context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static boolean isLocationEnabled(Context context) {
+        LocationManager lm = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+        if (lm == null) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return lm.isLocationEnabled();
+        }
+        return lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                || lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+    }
+
+    // With only COARSE granted, prefer the network provider.
+    private static String pickProvider(LocationManager lm, boolean precise) {
+        boolean gps = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        boolean network = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        if (precise && gps) return LocationManager.GPS_PROVIDER;
+        if (network) return LocationManager.NETWORK_PROVIDER;
+        if (gps) return LocationManager.GPS_PROVIDER;
+        return null;
+    }
+
+    // Newest last-known fix across providers (accuracy alone would favour a stale GPS fix).
+    private static Location getBestLastLocation(LocationManager lm) {
+        Location best = null;
+        for (String provider : lm.getProviders(true)) {
+            try {
+                Location l = lm.getLastKnownLocation(provider);
+                if (l != null && (best == null || l.getTime() > best.getTime())) best = l;
+            } catch (SecurityException ignored) {}
+        }
+        return best;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static boolean isMock(Location location) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return location.isMock();
+        }
+        return location.isFromMockProvider();
     }
 
     private static void processAndSend(AppActivity activity, Location location) {
         new Thread(() -> {
-            String city = "", state = "", country = "", postcode = "";
+            String city = "", state = "", country = "", countryCode = "", postcode = "";
 
-            // Try Android Geocoder first
+            // City comes from the phone's geocoder only. If it fails the fields stay empty and
+            // the backend should geocode from latitude/longitude.
             try {
                 if (Geocoder.isPresent()) {
                     Geocoder geocoder = new Geocoder(activity, Locale.getDefault());
+                    @SuppressWarnings("deprecation")
                     List<Address> addresses = geocoder.getFromLocation(
                             location.getLatitude(), location.getLongitude(), 1);
                     if (addresses != null && !addresses.isEmpty()) {
                         Address addr = addresses.get(0);
-                        city     = addr.getLocality()    != null ? addr.getLocality()    : "";
-                        state    = addr.getAdminArea()   != null ? addr.getAdminArea()   : "";
-                        country  = addr.getCountryName() != null ? addr.getCountryName() : "";
-                        postcode = addr.getPostalCode()  != null ? addr.getPostalCode()  : "";
+                        city        = addr.getLocality()    != null ? addr.getLocality()    : "";
+                        state       = addr.getAdminArea()   != null ? addr.getAdminArea()   : "";
+                        country     = addr.getCountryName() != null ? addr.getCountryName() : "";
+                        countryCode = addr.getCountryCode() != null ? addr.getCountryCode() : "";
+                        postcode    = addr.getPostalCode()  != null ? addr.getPostalCode()  : "";
                     }
                 }
-            } catch (IOException e) {
-                Log.w(TAG, "Geocoder failed, trying Nominatim: " + e.getMessage());
+            } catch (Exception e) {
+                Log.w(TAG, "Geocoder failed: " + e.getMessage());
             }
 
-            // Fallback: OpenStreetMap Nominatim API
-            if (city.isEmpty() && country.isEmpty()) {
-                try {
-                    String urlStr = String.format(Locale.US,
-                        "https://nominatim.openstreetmap.org/reverse?format=json&lat=%f&lon=%f&zoom=18&addressdetails=1",
-                        location.getLatitude(), location.getLongitude());
-                    HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
-                    conn.setRequestMethod("GET");
-                    conn.setRequestProperty("User-Agent", "GeoLocationApp/1.0");
-                    conn.setConnectTimeout(5000);
-                    conn.setReadTimeout(5000);
-
-                    BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(conn.getInputStream()));
-                    StringBuilder sb = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) sb.append(line);
-                    reader.close();
-                    conn.disconnect();
-
-                    String response = sb.toString();
-                    city     = extractJson(response, "city");
-                    if (city.isEmpty()) city = extractJson(response, "town");
-                    if (city.isEmpty()) city = extractJson(response, "village");
-                    if (city.isEmpty()) city = extractJson(response, "county");
-                    state    = extractJson(response, "state");
-                    country  = extractJson(response, "country");
-                    postcode = extractJson(response, "postcode");
-                } catch (Exception e) {
-                    Log.w(TAG, "Nominatim failed: " + e.getMessage());
-                }
+            String json;
+            try {
+                JSONObject obj = new JSONObject();
+                obj.put("latitude", location.getLatitude());
+                obj.put("longitude", location.getLongitude());
+                obj.put("accuracy", location.hasAccuracy() ? location.getAccuracy() : -1);
+                obj.put("timestamp", location.getTime());
+                obj.put("isPrecise", hasFinePermission(activity));
+                obj.put("isMock", isMock(location));
+                obj.put("city", city);
+                obj.put("state", state);
+                obj.put("country", country);
+                obj.put("countryCode", countryCode);
+                obj.put("postcode", postcode);
+                obj.put("platform", "android");
+                json = obj.toString();
+            } catch (Exception e) {
+                Log.e(TAG, "processAndSend: " + e.getMessage());
+                sendError(activity, "Failed to build location");
+                return;
             }
-
-            boolean isMock = location.isFromMockProvider();
-            String json = String.format(Locale.US,
-                "{\"latitude\":%f,\"longitude\":%f,\"city\":\"%s\",\"state\":\"%s\",\"country\":\"%s\",\"postcode\":\"%s\",\"isMock\":%b}",
-                location.getLatitude(), location.getLongitude(),
-                escape(city), escape(state), escape(country), escape(postcode), isMock);
 
             activity.runOnGLThread(() ->
                 Cocos2dxJavascriptJavaBridge.evalString("window.onLocation(" + json + ")")
@@ -321,23 +380,9 @@ public class LocationHelper {
         }).start();
     }
 
-    private static String extractJson(String json, String key) {
-        String search = "\"" + key + "\":\"";
-        int start = json.indexOf(search);
-        if (start == -1) return "";
-        start += search.length();
-        int end = json.indexOf("\"", start);
-        if (end == -1) return "";
-        return json.substring(start, end);
-    }
-
     private static void sendError(AppActivity activity, String msg) {
         activity.runOnGLThread(() ->
-            Cocos2dxJavascriptJavaBridge.evalString("window.onLocationError('" + msg + "')")
+            Cocos2dxJavascriptJavaBridge.evalString("window.onLocationError(" + JSONObject.quote(msg) + ")")
         );
-    }
-
-    private static String escape(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("'", "\\'");
     }
 }

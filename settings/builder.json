@@ -43,7 +43,7 @@
   },
   "android-instant": {
     "packageName": "org.cocos2d.demo",
-    "REMOTE_SERVER_ROOT": "",
+    "REMOTE_SERVER_ROOT": "http://10.109.21.120:7456/preview-android-instant/",
     "pathPattern": "",
     "scheme": "https",
     "host": "",
@@ -55,5 +55,6 @@
     "REMOTE_SERVER_ROOT": ""
   },
   "appBundle": false,
-  "agreements": {}
+  "agreements": {},
+  "includeAnySDK": false
 }

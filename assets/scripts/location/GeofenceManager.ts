@@ -1,4 +1,5 @@
 import { LocationEvent } from "./LocationEvent";
+import WebLocationHelper from "./WebLocationHelper";
 
 export interface IZone {
     id: string;
@@ -11,7 +12,7 @@ export interface IZone {
 // Default safe zone — when backend is ready, replace via loadZones() with API-fetched zones.
 // Inside radiusKm of this point = safe zone, outside = unsafe zone.
 const ZONES: IZone[] = [
-    { id: "safe", name: "Safe Zone", lat: 28.628508, lng: 77.372525, radiusKm: 0.005 },
+    { id: "safe", name: "Safe Zone", lat: 28.628508, lng: 77.372525, radiusKm: 0.02 },
 ];
 
 // Extra distance (km) beyond radiusKm before an "inside" zone is considered exited, and vice versa.
@@ -23,21 +24,36 @@ export default class GeofenceManager {
     private _activeZones: Set<string> = new Set();
     private _checkedZones: Set<string> = new Set();
 
+    // Latest check result per zone, read by the on-screen debug panel.
+    public debugLines: { [zoneId: string]: string } = {};
+    public lastCheckTime = 0;
+    public checkCount = 0;
+
     public static get instance(): GeofenceManager {
         if (!this._instance) this._instance = new GeofenceManager();
         return this._instance;
     }
 
+    private _running = false;
+
+    /** Last position seen by checkZones, sent with zone events to the backend. */
+    public lastLat = 0;
+    public lastLng = 0;
+
     public init() {
-        (window as any).onLocationTick = (lat: number, lng: number) => {
-            cc.log(`[Geofence] tick (${lat}, ${lng})`);
-            this.checkZones(lat, lng);
+        // Permission can be reported more than once (app resume, settings return); start only once.
+        if (this._running) return;
+        this._running = true;
+        (window as any).onLocationTick = (lat: number, lng: number, accuracy: number) => {
+            cc.log(`[Geofence] tick (${lat}, ${lng}) acc=${accuracy}m`);
+            this.checkZones(lat, lng, accuracy);
         };
         this._startContinuous();
     }
 
     public stop() {
-        if (!cc.sys.isNative) return;
+        this._running = false;
+        if (!cc.sys.isNative) { WebLocationHelper.stopContinuousUpdates(); return; }
         if (cc.sys.os === cc.sys.OS_IOS) {
             jsb.reflection.callStaticMethod("LocationHelper", "stopContinuousUpdates:", "");
         } else if (cc.sys.os === cc.sys.OS_ANDROID) {
@@ -45,9 +61,8 @@ export default class GeofenceManager {
         }
     }
 
-    // When backend is ready: fetch zones from API and replace ZONES array
     public static showNativeAlert(title: string, message: string) {
-        if (!cc.sys.isNative) { cc.warn(`${title}: ${message}`); return; }
+        if (!cc.sys.isNative) { WebLocationHelper.showAlert(title, message); return; }
         const params = `${title}|${message}`;
         if (cc.sys.os === cc.sys.OS_IOS) {
             jsb.reflection.callStaticMethod("LocationHelper", "showAlert:", params);
@@ -58,13 +73,18 @@ export default class GeofenceManager {
         }
     }
 
+    /** Replaces the zone list, e.g. with zones fetched by LocationApi.fetchZones(). */
     public loadZones(zones: IZone[]) {
         ZONES.length = 0;
         zones.forEach(z => ZONES.push(z));
+        // Re-evaluate every zone from scratch on the next check.
+        this._activeZones.clear();
+        this._checkedZones.clear();
+        this.debugLines = {};
     }
 
     private _startContinuous() {
-        if (!cc.sys.isNative) return;
+        if (!cc.sys.isNative) { WebLocationHelper.startContinuousUpdates(); return; }
         if (cc.sys.os === cc.sys.OS_IOS) {
             jsb.reflection.callStaticMethod("LocationHelper", "startContinuousUpdates:", "");
         } else if (cc.sys.os === cc.sys.OS_ANDROID) {
@@ -72,9 +92,28 @@ export default class GeofenceManager {
         }
     }
 
-    public checkZones(lat: number, lng: number) {
+    /** accuracy: metres of possible error in the fix; -1 or undefined means unknown. */
+    public checkZones(lat: number, lng: number, accuracy: number = -1) {
+        // Older native builds call onLocationTick(lat, lng) without accuracy.
+        if (typeof accuracy !== "number" || isNaN(accuracy)) accuracy = -1;
+        this.lastLat = lat;
+        this.lastLng = lng;
         for (const zone of ZONES) {
             const dist = this._haversine(lat, lng, zone.lat, zone.lng);
+            const accText = accuracy >= 0 ? `${accuracy.toFixed(0)} m` : "unknown";
+
+            // A fix whose error is larger than the zone cannot tell inside from outside,
+            // so keep the previous state instead of raising a wrong enter/exit.
+            if (accuracy > zone.radiusKm * 1000) {
+                this.checkCount++;
+                this.lastCheckTime = Date.now();
+                this.debugLines[zone.id] =
+                    `${zone.name}: SKIPPED (acc ${accText} > radius ${(zone.radiusKm * 1000).toFixed(0)} m)\n` +
+                    `me: ${lat.toFixed(6)}, ${lng.toFixed(6)}\n` +
+                    `dist: ${(dist * 1000).toFixed(1)} m`;
+                cc.log(`[Geofence] ${zone.name} skipped: accuracy ${accText} worse than radius`);
+                continue;
+            }
             const wasInside = this._activeZones.has(zone.id);
             // Hysteresis: once inside, must move past radius + buffer to count as exited (and vice versa).
             // Avoids alert flip-flopping from GPS jitter near the boundary.
@@ -82,6 +121,13 @@ export default class GeofenceManager {
             const inside = dist <= threshold;
             const firstCheck = !this._checkedZones.has(zone.id);
             this._checkedZones.add(zone.id);
+
+            this.checkCount++;
+            this.lastCheckTime = Date.now();
+            this.debugLines[zone.id] =
+                `${zone.name}: ${inside ? "INSIDE" : "OUTSIDE"}\n` +
+                `me: ${lat.toFixed(6)}, ${lng.toFixed(6)}\n` +
+                `dist: ${(dist * 1000).toFixed(1)} m  (limit ${(threshold * 1000).toFixed(1)} m)  acc: ${accText}`;
 
             if (zone.id === "safe") {
                 cc.log(`[Geofence] safe zone dist=${(dist * 1000).toFixed(1)}m threshold=${(threshold * 1000).toFixed(1)}m inside=${inside}`);
